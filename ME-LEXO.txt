@@ -1,0 +1,436 @@
+ALBANIAN READ-ME
+Më poshtë është i njëjti projekt “Hand Mouse Control” për Windows, por i përkthyer në gjuhën shqipe. Ai përfshin:
+
+Një skedar Python i dokumentuar (hand_mouse.py) që:
+
+Ndjek dorën e djathtë për lëvizje të mausit (me shpejtësi dinamike).
+Ndjek dorën e majtë për klikime.
+Përdor MediaPipe për gjurmimin e pikave të dorës, OpenCV për hyrjen nga kamera dhe PyAutoGUI për kontrollin e mausit.
+Një skript batch (install_and_run.bat) që:
+
+Shkarkon dhe instalon në heshtje Python (64-bit).
+Shkarkon dhe instalon në heshtje Git (64-bit).
+InstalON bibliotekat e nevojshme Python (mediapipe, opencv-python, pyautogui).
+Në fund ekzekuton skriptin hand_mouse.py.
+Kështu, ju mund ta distribuoni këtë paketë te kushdo që përdor Windows 7/10/11 (me të drejta administratori dhe qasje në internet). Ata e shkarkojnë, e shpaketojnë dhe dyfish-klikojnë skriptin batch. Kjo duhet të funksionojë “ashtu siç është” duke instaluar gjithçka dhe duke nisur aplikacionin për kontrollin me dorë.
+
+Struktura e Projektit
+bash
+Copy code
+hand_mouse_control/
+    ├── hand_mouse.py           # Kodi kryesor Python me dokumentim të detajuar
+    └── install_and_run.bat     # Skripti batch që instalon Python, Git, dhe ekzekuton hand_mouse.py
+Distribuoni këtë folder si një ZIP te përdoruesit tuaj.
+
+1) hand_mouse.py (Kodi Kryesor)
+Më poshtë keni një version plotësisht të dokumentuar me komente të hollësishme në vijë. Përdor:
+
+MediaPipe për gjurmimin e dorës në kohë reale
+OpenCV për marrjen e sinjalit nga kamera
+PyAutoGUI për kontrollin e mausit dhe klikimet
+python
+Copy code
+"""
+hand_mouse.py
+
+Një skript Python që përdor kamerën e kompjuterit tuaj për të ndjekur:
+- Dorën e djathtë për lëvizjen e mausit
+- Dorën e majtë për gjestet e klikimit
+
+Përdor:
+- MediaPipe për detektimin e pikave të dorës në kohë reale
+- OpenCV për kapjen e imazhit nga kamera
+- PyAutoGUI për lëvizjen/klikimin e mausit
+
+Autori: Ju dhe ChatGPT
+"""
+
+import cv2
+import mediapipe as mp
+import pyautogui
+import math
+
+class HandMouseControl:
+    """
+    Klasa kryesore që menaxhon:
+      - Detektimin e dorës
+      - Lëvizjen e mausit me shpejtësi dinamike
+      - Klikimet me dorën e majtë, lëvizjen me dorën e djathtë
+    """
+    def __init__(self):
+        """
+        Inicializon modulIN e duarve të MediaPipe, funksionet për vizatim,
+        si dhe vendos variablat kryesore për lëvizjen e mausit dhe logjikën e klikimit.
+        """
+        # Konfigurimi i MediaPipe
+        self.mp_hands = mp.solutions.hands
+        self.hands = self.mp_hands.Hands(
+            max_num_hands=2,
+            min_detection_confidence=0.5,
+            min_tracking_confidence=0.5
+        )
+        self.mp_drawing = mp.solutions.drawing_utils
+
+        # Informacioni i ekranit
+        self.screen_width, self.screen_height = pyautogui.size()
+        pyautogui.FAILSAFE = False  # Çaktivizon daljen emergjente kur shkon në kënd
+        pyautogui.PAUSE = 0         # Asnjë pauzë e brendshme nga PyAutoGUI
+
+        # Bllokimi i lëvizjes së mausit
+        self.mouse_locked = False
+        self.last_finger_x = None
+        self.last_finger_y = None
+
+        # Shpejtësia bazë nëse distanca midis gishtit tregues dhe atij të mesit është zero
+        self.base_speed = 4.5
+
+        # Për një gamë të gjerë shpejtësish dinamike
+        self.min_speed = 2.0
+        self.max_speed = 20.0
+        self.scale_divisor = 2.0  # Sa më e vogël, aq më të mëdha rritjet e shpejtësisë
+
+        # Zonë e “vdekur” për të injoruar dridhjet e vogla të dorës
+        self.dead_zone = 3
+
+        # Pragjet e distancës (në piksel) për gjeste
+        self.PINCH_THRESHOLD = 10    # Thumb–pinky => gjest për "lock"
+        self.CLICK_THRESHOLD = 10    # Thumb–index => klik i majtë; thumb–pinky => klik i djathtë
+
+        # Gjurmimi i gjendjeve të klikimit, që të mos shkaktohen disa klikime për një herë
+        self.left_click_active = False
+        self.right_click_active = False
+
+    def process_frame(self, frame):
+        """
+        Konverton kornizën e dhënë BGR në RGB dhe ekzekuton detektimin
+        e duarve përmes MediaPipe.
+
+        :param frame: Korniza BGR aktuale nga OpenCV
+        :return: rezultatet nga self.hands.process(), që mund të përmbajnë landmarke të dorës
+        """
+        rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        results = self.hands.process(rgb_frame)
+        return results
+
+    def run_detection(self, hand_results, frame):
+        """
+        Logjika kryesore që:
+          1) Vizaton kuadrate rreth duarve
+          2) Vendos nëse një dorë është në anën e majtë apo të djathtë të ekranit
+          3) Për anën e majtë => menaxhon klikimet
+             Për anën e djathtë => menaxhon lëvizjen e mausit
+
+        :param hand_results: Rezultati nga detektimi i duarve të MediaPipe
+        :param frame: Korniza BGR nga kamera (do të vizatojmë mbi të)
+        """
+        # Nëse nuk ka duar të detektuara, nuk bëjmë asgjë
+        if not hand_results.multi_hand_landmarks:
+            return
+
+        # Vizato kuadrate dhe landmarke për të gjitha duart
+        for hand_landmarks in hand_results.multi_hand_landmarks:
+            box = self.get_hand_bounding_box(hand_landmarks, frame)
+            if not box:
+                continue
+
+            hx1, hy1, hx2, hy2, cx, cy = box
+            frame_center_x = frame.shape[1] // 2
+
+            # Nëse qendra e kuadratit është në anën e majtë => "dora e majtë"
+            is_left_side = (cx < frame_center_x)
+
+            # Vizato kuadratin
+            color = (255, 0, 0) if is_left_side else (0, 0, 255)  # BGR: Blu ose e kuqe
+            cv2.rectangle(frame, (hx1, hy1), (hx2, hy2), color, 2)
+
+            # Vizato 21 landmarket e dorës
+            self.mp_drawing.draw_landmarks(
+                frame,
+                hand_landmarks,
+                self.mp_hands.HAND_CONNECTIONS,
+                self.mp_drawing.DrawingSpec(color=color, thickness=2, circle_radius=2),
+                self.mp_drawing.DrawingSpec(color=color, thickness=2)
+            )
+
+        # Tani menaxho logjikën (anë e majtë => klikime, anë e djathtë => lëvizje)
+        for hand_landmarks in hand_results.multi_hand_landmarks:
+            box = self.get_hand_bounding_box(hand_landmarks, frame)
+            if not box:
+                continue
+
+            hx1, hy1, hx2, hy2, cx, cy = box
+            frame_center_x = frame.shape[1] // 2
+            is_left_side = (cx < frame_center_x)
+
+            if is_left_side:
+                self.handle_clicks(hand_landmarks, frame)
+            else:
+                self.move_mouse(hand_landmarks, frame)
+
+    def get_hand_bounding_box(self, hand_landmarks, frame):
+        """
+        Llogarit një kuadrat për të gjithë 21 pikat e një dore.
+
+        :param hand_landmarks: 21 pikat e dorës nga MediaPipe
+        :param frame: Korniza e kamerës për referencë dimensionale
+        :return: (x1, y1, x2, y2, cx, cy) = këndet e kuadratit + qendra
+                 ose None nëse diçka nuk shkon
+        """
+        ih, iw, _ = frame.shape
+        x_coords, y_coords = [], []
+
+        for lm in hand_landmarks.landmark:
+            x_coords.append(int(lm.x * iw))
+            y_coords.append(int(lm.y * ih))
+
+        if not x_coords or not y_coords:
+            return None
+
+        x1, x2 = min(x_coords), max(x_coords)
+        y1, y2 = min(y_coords), max(y_coords)
+        cx = (x1 + x2) // 2
+        cy = (y1 + y2) // 2
+        return (x1, y1, x2, y2, cx, cy)
+
+    def move_mouse(self, hand_landmarks, frame):
+        """
+        Lëviz mausIN nëse dora e djathtë detektohet dhe nuk është e bllokuar.
+        Shpejtësia e lëvizjes është dinamike në bazë të distancës mes gishtit tregues (8) dhe atij të mesit (12).
+
+        :param hand_landmarks: 21 pikat e dorës nga MediaPipe
+        :param frame: Korniza e kamerës (nuk përdoret përveç formës)
+        """
+        ih, iw, _ = frame.shape
+
+        # Gishtat kryesorë
+        thumb = hand_landmarks.landmark[4]
+        pinky = hand_landmarks.landmark[20]
+        index_finger = hand_landmarks.landmark[8]
+        middle_finger = hand_landmarks.landmark[12]
+
+        thumb_x, thumb_y = int(thumb.x * iw), int(thumb.y * ih)
+        pinky_x, pinky_y = int(pinky.x * iw), int(pinky.y * ih)
+        index_x, index_y = int(index_finger.x * iw), int(index_finger.y * ih)
+        middle_x, middle_y = int(middle_finger.x * iw), int(middle_finger.y * ih)
+
+        # Blloko ose zhblloko kur thumb–pinky janë afër
+        dist_thumb_pinky = math.hypot(thumb_x - pinky_x, thumb_y - pinky_y)
+        if dist_thumb_pinky < self.PINCH_THRESHOLD:
+            self.mouse_locked = True
+        else:
+            if self.mouse_locked:
+                # Sapo u zhbllokua, rivendosni pozicionin e fundit të gishtit
+                self.last_finger_x = index_x
+                self.last_finger_y = index_y
+            self.mouse_locked = False
+
+        if not self.mouse_locked:
+            # Nëse është hera e parë ose sapo u zhbllokua
+            if self.last_finger_x is None or self.last_finger_y is None:
+                self.last_finger_x = index_x
+                self.last_finger_y = index_y
+                return
+
+            # Llogarit shpejtësinë dinamike bazuar në distancën index–middle
+            dist_index_middle = math.hypot(index_x - middle_x, index_y - middle_y)
+            speed = self.get_dynamic_speed(dist_index_middle)
+
+            # Sa është lëvizur gishti krahasuar me kornizën e fundit
+            dx = index_x - self.last_finger_x
+            dy = index_y - self.last_finger_y
+
+            # Injoroni lëvizjet e vogla
+            if abs(dx) < self.dead_zone and abs(dy) < self.dead_zone:
+                return
+
+            move_x = int(dx * speed)
+            move_y = int(dy * speed)
+
+            current_mouse_x, current_mouse_y = pyautogui.position()
+            new_x = max(0, min(self.screen_width - 1, current_mouse_x + move_x))
+            new_y = max(0, min(self.screen_height - 1, current_mouse_y + move_y))
+
+            # Lëviz mausIN
+            pyautogui.moveTo(new_x, new_y)
+
+            # Përditëson pozicionin e fundit të gishtit
+            self.last_finger_x = index_x
+            self.last_finger_y = index_y
+
+    def get_dynamic_speed(self, dist_index_middle):
+        """
+        Konverton distancën mes gishtit tregues dhe atij të mesit
+        në një faktor shpejtësie. Sa më afër => më e ngadaltë, sa më larg => më e shpejtë.
+
+        :param dist_index_middle: Distanca në piksel midis index (8) dhe middle (12)
+        :return: një vlerë float që paraqet shumëzuesin e shpejtësisë
+        """
+        if dist_index_middle <= 0:
+            return self.base_speed
+        # shpejtësia fillestare = distanca / scale_divisor
+        raw_speed = dist_index_middle / self.scale_divisor
+        # kufizo në [min_speed, max_speed]
+        speed = max(self.min_speed, min(self.max_speed, raw_speed))
+        return speed
+
+    def handle_clicks(self, hand_landmarks, frame):
+        """
+        Menaxhon klikimet e majta/djathta duke përdorur dorën e majtë.
+        - thumb–index afër => klik i majtë i mbajtur
+        - thumb–pinky afër => klik i djathtë (vetëm një herë)
+
+        :param hand_landmarks: 21 pikat e dorës nga MediaPipe
+        :param frame: Korniza e kamerës (nuk përdoret, përveç formës)
+        """
+        ih, iw, _ = frame.shape
+        thumb = hand_landmarks.landmark[4]
+        index_finger = hand_landmarks.landmark[8]
+        pinky = hand_landmarks.landmark[20]
+
+        thumb_x, thumb_y = int(thumb.x * iw), int(thumb.y * ih)
+        index_x, index_y = int(index_finger.x * iw), int(index_finger.y * ih)
+        pinky_x, pinky_y = int(pinky.x * iw), int(pinky.y * ih)
+
+        dist_thumb_index = math.hypot(thumb_x - index_x, thumb_y - index_y)
+        dist_thumb_pinky = math.hypot(thumb_x - pinky_x, thumb_y - pinky_y)
+
+        # Klik i majtë
+        if dist_thumb_index < self.CLICK_THRESHOLD:
+            if not self.left_click_active:
+                pyautogui.mouseDown()
+                self.left_click_active = True
+        else:
+            if self.left_click_active:
+                pyautogui.mouseUp()
+                self.left_click_active = False
+
+        # Klik i djathtë
+        if dist_thumb_pinky < self.CLICK_THRESHOLD:
+            if not self.right_click_active:
+                pyautogui.click(button='right')
+                self.right_click_active = True
+        else:
+            self.right_click_active = False
+
+
+def main():
+    """
+    Funksioni kryesor që:
+      - Hap kamerën e paracaktuar
+      - Vendos rezolucionin & framerate
+      - Krijon objektin HandMouseControl
+      - Përpunon kornizat në një cikël, i ekzekuton, dhe i shfaq
+    """
+    cap = cv2.VideoCapture(0)
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
+    cap.set(cv2.CAP_PROP_FPS, 60)
+
+    controller = HandMouseControl()
+
+    try:
+        while True:
+            ret, frame = cap.read()
+            if not ret:
+                break
+
+            # Kthe në mënyrë horizontale (efekt pasqyre)
+            frame = cv2.flip(frame, 1)
+
+            # Detekto duart
+            hand_results = controller.process_frame(frame)
+
+            # Logjika kryesore (vizato kuadrate, lëviz mausIN, menaxho klikimet)
+            controller.run_detection(hand_results, frame)
+
+            # Shfaq pamjen e kamerës
+            cv2.imshow('Hand Mouse Control', frame)
+            if cv2.waitKey(1) & 0xFF == ord('q'):
+                # Shtyp 'q' për të dalë
+                break
+    finally:
+        # Pastrimi i mjeteve
+        cap.release()
+        cv2.destroyAllWindows()
+
+if __name__ == "__main__":
+    main()
+2) install_and_run.bat (Skript Batch)
+Më poshtë është skripti Windows që:
+
+Shkarkon & instalon Python (64-bit) në heshtje.
+Shkarkon & instalon Git (64-bit) në heshtje.
+InstalON bibliotekat e nevojshme Python (mediapipe, opencv-python, pyautogui).
+Ekzekuton hand_mouse.py.
+Rëndësishme:
+
+Mund të kërkojë të drejta administratori.
+Windows-i i përdoruesit duhet të lejojë ekzekutimin e .bat skripteve dhe të mos bllokojë instalimet e heshtura.
+Lidhjet e drejtpërdrejta për Python & Git mund të ndryshojnë me kohën — përditësoni nëse dalin gabime 404.
+bat
+Copy code
+@echo off
+REM ============================================
+REM install_and_run.bat
+REM
+REM Skript i cili:
+REM  1) InstalON në heshtje Python 64-bit
+REM  2) InstalON në heshtje Git 64-bit
+REM  3) InstalON bibliotekat e nevojshme Python
+REM  4) Ekzekuton hand_mouse.py
+REM
+REM Kërkesat:
+REM   - Windows 7/10/11
+REM   - Të drejta administratori
+REM   - Lidhje interneti
+REM ============================================
+
+echo Instalimi i Python (64-bit)...
+
+:: Shkarko Python 3.11.4 64-bit installer
+powershell -Command "(New-Object Net.WebClient).DownloadFile('https://www.python.org/ftp/python/3.11.4/python-3.11.4-amd64.exe','python_installer.exe')"
+
+:: Instalim në heshtje, në të gjithë sistemin, shto në PATH
+start /wait python_installer.exe /quiet InstallAllUsers=1 PrependPath=1
+del python_installer.exe
+
+echo Instalimi i Git (64-bit)...
+
+:: Shkarko Git 2.42.0 64-bit installer
+powershell -Command "(New-Object Net.WebClient).DownloadFile('https://github.com/git-for-windows/git/releases/download/v2.42.0.windows.1/Git-2.42.0-64-bit.exe','git_installer.exe')"
+
+:: Instalim në heshtje, pa ristart
+start /wait git_installer.exe /VERYSILENT /NORESTART
+del git_installer.exe
+
+echo Instalimi i bibliotekave Python (mediapipe, opencv-python, pyautogui)...
+
+:: Përditëso pip dhe instalo bibliotekat
+python -m pip install --upgrade pip
+python -m pip install mediapipe opencv-python pyautogui
+
+echo Duke nisur hand_mouse.py...
+python hand_mouse.py
+
+echo Mbaroi! Shtyp ndonjë buton për të dalë.
+pause
+Si Ta Përdorni Ose Ta Distribuoni
+Rregullimi i Folderit
+Struktura përfundimtare e folderit tuaj:
+markdown
+Copy code
+hand_mouse_control/
+    ├── hand_mouse.py
+    └── install_and_run.bat
+Zip & Share
+Paketojeni (zip) komplet folderin hand_mouse_control.
+Kushdo në Windows 7/10/11 me internet dhe të drejta administratori, e shpaketon dhe dyfish-klik install_and_run.bat.
+Çfarë Ndodh
+Shkarkohet & instalohet Python, Git, pastaj bibliotekat Python, dhe ekzekutohet hand_mouse.py.
+Një dritare me kamerën hapet dhe detekton lëvizjet e dorës për kontrollin e mausit.
+Nëse nuk doni të instaloni Python dhe Git në makinat e synuara, mund të konsideroni përdorimin e PyInstaller për të krijuar një .exe. Por qasja e mësipërme është një “zgjidhje universale” që siguron instalimin e Python, nëse mungon.
+
+Kaq Ishte!
+
+BESIAN SHERIFAJ - (+355) 69 2 888 245 - Fier,Albania
+

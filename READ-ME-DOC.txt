@@ -1,0 +1,432 @@
+
+ENGLISH READ-ME
+
+Below is a complete “Hand Mouse Control” project for Windows with:
+
+A fully documented Python script (hand_mouse.py) that:
+
+Tracks your right hand for mouse movement (with dynamic speed).
+Tracks your left hand for clicks.
+Uses MediaPipe for hand landmarks, OpenCV for camera input, and PyAutoGUI for controlling the mouse.
+A batch script (install_and_run.bat) that:
+
+Silently downloads and installs Python (64-bit).
+Silently downloads and installs Git (64-bit).
+Installs the required Python libraries (mediapipe, opencv-python, pyautogui).
+Finally runs the hand_mouse.py script.
+With these, you can distribute to anyone running Windows 7/10/11 (with admin privileges and an internet connection). They unzip and double-click the batch file. It should “just work,” installing everything and launching the hand-control app.
+
+Project Structure
+bash
+Copy code
+hand_mouse_control/
+    ├── hand_mouse.py           # Main Python code with detailed docstrings
+    └── install_and_run.bat     # Batch script that installs Python, Git, and runs hand_mouse.py
+Distribute this folder as a ZIP to your users.
+
+1) hand_mouse.py (Main Code)
+Below is a fully documented version with extensive inline comments. It uses:
+
+MediaPipe for hand tracking
+OpenCV for reading your webcam
+PyAutoGUI for moving the mouse and performing clicks
+python
+Copy code
+"""
+hand_mouse.py
+
+A Python script that uses your webcam to track:
+- Right hand for mouse movement
+- Left hand for click gestures
+
+It uses:
+- MediaPipe for real-time hand landmark detection
+- OpenCV to capture camera frames
+- PyAutoGUI to move/click the mouse
+
+Author: You and ChatGPT
+"""
+
+import cv2
+import mediapipe as mp
+import pyautogui
+import math
+
+class HandMouseControl:
+    """
+    The main class that handles:
+      - Hand detection
+      - Mouse movement with dynamic speed
+      - Left-hand clicks vs. right-hand movement
+    """
+    def __init__(self):
+        """
+        Initializes the MediaPipe hands module, the drawing utils, and sets
+        up important variables for mouse movement and click logic.
+        """
+        # MediaPipe setup
+        self.mp_hands = mp.solutions.hands
+        self.hands = self.mp_hands.Hands(
+            max_num_hands=2,
+            min_detection_confidence=0.5,
+            min_tracking_confidence=0.5
+        )
+        self.mp_drawing = mp.solutions.drawing_utils
+
+        # Screen info
+        self.screen_width, self.screen_height = pyautogui.size()
+        pyautogui.FAILSAFE = False  # Disables corner crash
+        pyautogui.PAUSE = 0         # No built-in pause
+
+        # Mouse movement locking
+        self.mouse_locked = False
+        self.last_finger_x = None
+        self.last_finger_y = None
+
+        # Base speed if index–middle distance is zero
+        self.base_speed = 4.5
+
+        # For a wide range of dynamic speeds
+        self.min_speed = 2.0
+        self.max_speed = 20.0
+        self.scale_divisor = 2.0  # The smaller this is, the bigger speed jumps
+
+        # Dead zone to ignore minuscule hand jitter
+        self.dead_zone = 3
+
+        # Distance thresholds (in pixels) for gestures
+        self.PINCH_THRESHOLD = 10    # Thumb–pinky => "lock" gesture
+        self.CLICK_THRESHOLD = 10    # Thumb–index => left click; thumb–pinky => right click
+
+        # Tracking click states so we only trigger once per pinch
+        self.left_click_active = False
+        self.right_click_active = False
+
+    def process_frame(self, frame):
+        """
+        Converts the given BGR frame to RGB and runs the MediaPipe hand detection.
+        
+        :param frame: The current BGR camera frame from OpenCV
+        :return: results from self.hands.process() which may contain hand landmarks
+        """
+        rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        results = self.hands.process(rgb_frame)
+        return results
+
+    def run_detection(self, hand_results, frame):
+        """
+        Main logic that:
+          1) Draws bounding boxes around hands
+          2) Decides if a hand is on left or right side of the screen
+          3) For the left side => handle clicks
+             For the right side => handle mouse movement
+        :param hand_results: Output from MediaPipe's hand detection
+        :param frame: The current BGR camera frame (we will draw on it)
+        """
+        # If no hands detected, we do nothing
+        if not hand_results.multi_hand_landmarks:
+            return
+
+        # Draw bounding boxes and landmarks for all hands
+        for hand_landmarks in hand_results.multi_hand_landmarks:
+            box = self.get_hand_bounding_box(hand_landmarks, frame)
+            if not box:
+                continue
+
+            hx1, hy1, hx2, hy2, cx, cy = box
+            frame_center_x = frame.shape[1] // 2
+
+            # If center of bounding box is left side => "left hand"
+            is_left_side = (cx < frame_center_x)
+
+            # Draw bounding box
+            color = (255, 0, 0) if is_left_side else (0, 0, 255)  # BGR: Blue or Red
+            cv2.rectangle(frame, (hx1, hy1), (hx2, hy2), color, 2)
+
+            # Draw the 21 hand landmarks
+            self.mp_drawing.draw_landmarks(
+                frame,
+                hand_landmarks,
+                self.mp_hands.HAND_CONNECTIONS,
+                self.mp_drawing.DrawingSpec(color=color, thickness=2, circle_radius=2),
+                self.mp_drawing.DrawingSpec(color=color, thickness=2)
+            )
+
+        # Now handle logic (left side => clicks, right side => movement)
+        for hand_landmarks in hand_results.multi_hand_landmarks:
+            box = self.get_hand_bounding_box(hand_landmarks, frame)
+            if not box:
+                continue
+
+            hx1, hy1, hx2, hy2, cx, cy = box
+            frame_center_x = frame.shape[1] // 2
+            is_left_side = (cx < frame_center_x)
+
+            if is_left_side:
+                self.handle_clicks(hand_landmarks, frame)
+            else:
+                self.move_mouse(hand_landmarks, frame)
+
+    def get_hand_bounding_box(self, hand_landmarks, frame):
+        """
+        Calculates a bounding box from all 21 landmarks of a single hand.
+        
+        :param hand_landmarks: The 21 landmark points from MediaPipe
+        :param frame: The current camera frame used for dimension references
+        :return: (x1, y1, x2, y2, cx, cy) = bounding box corners + center
+                 or None if something fails
+        """
+        ih, iw, _ = frame.shape
+        x_coords, y_coords = [], []
+
+        for lm in hand_landmarks.landmark:
+            x_coords.append(int(lm.x * iw))
+            y_coords.append(int(lm.y * ih))
+
+        if not x_coords or not y_coords:
+            return None
+
+        x1, x2 = min(x_coords), max(x_coords)
+        y1, y2 = min(y_coords), max(y_coords)
+        cx = (x1 + x2) // 2
+        cy = (y1 + y2) // 2
+        return (x1, y1, x2, y2, cx, cy)
+
+    def move_mouse(self, hand_landmarks, frame):
+        """
+        Moves the mouse if the right hand is detected and not locked.
+        Movement speed is dynamic based on the distance between index (8) and middle (12) fingers.
+        
+        :param hand_landmarks: The 21 landmark points from MediaPipe
+        :param frame: The camera frame (unused except for shape references)
+        """
+        ih, iw, _ = frame.shape
+
+        # Extract some key finger tips
+        thumb = hand_landmarks.landmark[4]
+        pinky = hand_landmarks.landmark[20]
+        index_finger = hand_landmarks.landmark[8]
+        middle_finger = hand_landmarks.landmark[12]
+
+        thumb_x, thumb_y = int(thumb.x * iw), int(thumb.y * ih)
+        pinky_x, pinky_y = int(pinky.x * iw), int(pinky.y * ih)
+        index_x, index_y = int(index_finger.x * iw), int(index_finger.y * ih)
+        middle_x, middle_y = int(middle_finger.x * iw), int(middle_finger.y * ih)
+
+        # Lock or unlock when thumb–pinky are pinched
+        dist_thumb_pinky = math.hypot(thumb_x - pinky_x, thumb_y - pinky_y)
+        if dist_thumb_pinky < self.PINCH_THRESHOLD:
+            self.mouse_locked = True
+        else:
+            if self.mouse_locked:
+                # Just unlocked, reset last finger to avoid jump
+                self.last_finger_x = index_x
+                self.last_finger_y = index_y
+            self.mouse_locked = False
+
+        if not self.mouse_locked:
+            # If first run or just unlocked
+            if self.last_finger_x is None or self.last_finger_y is None:
+                self.last_finger_x = index_x
+                self.last_finger_y = index_y
+                return
+
+            # Calculate dynamic speed from index–middle distance
+            dist_index_middle = math.hypot(index_x - middle_x, index_y - middle_y)
+            speed = self.get_dynamic_speed(dist_index_middle)
+
+            # Calculate how much the finger moved since last frame
+            dx = index_x - self.last_finger_x
+            dy = index_y - self.last_finger_y
+
+            # Ignore tiny movements
+            if abs(dx) < self.dead_zone and abs(dy) < self.dead_zone:
+                return
+
+            move_x = int(dx * speed)
+            move_y = int(dy * speed)
+
+            current_mouse_x, current_mouse_y = pyautogui.position()
+            new_x = max(0, min(self.screen_width - 1, current_mouse_x + move_x))
+            new_y = max(0, min(self.screen_height - 1, current_mouse_y + move_y))
+
+            # Move mouse
+            pyautogui.moveTo(new_x, new_y)
+
+            # Update last finger position
+            self.last_finger_x = index_x
+            self.last_finger_y = index_y
+
+    def get_dynamic_speed(self, dist_index_middle):
+        """
+        Converts the distance between the index and middle fingers into
+        a speed multiplier. Closer => slower, further => faster.
+        
+        :param dist_index_middle: The pixel distance between index (8) and middle (12)
+        :return: A float representing the speed multiplier
+        """
+        if dist_index_middle <= 0:
+            return self.base_speed
+        # raw speed = distance / scale_divisor
+        raw_speed = dist_index_middle / self.scale_divisor
+        # clamp to [min_speed, max_speed]
+        speed = max(self.min_speed, min(self.max_speed, raw_speed))
+        return speed
+
+    def handle_clicks(self, hand_landmarks, frame):
+        """
+        Manages left/right clicks using the left hand.
+        - thumb–index pinch => left click hold
+        - thumb–pinky pinch => single right click
+        :param hand_landmarks: The 21 landmark points from MediaPipe
+        :param frame: The camera frame (unused except for shape references)
+        """
+        ih, iw, _ = frame.shape
+        thumb = hand_landmarks.landmark[4]
+        index_finger = hand_landmarks.landmark[8]
+        pinky = hand_landmarks.landmark[20]
+
+        thumb_x, thumb_y = int(thumb.x * iw), int(thumb.y * ih)
+        index_x, index_y = int(index_finger.x * iw), int(index_finger.y * ih)
+        pinky_x, pinky_y = int(pinky.x * iw), int(pinky.y * ih)
+
+        dist_thumb_index = math.hypot(thumb_x - index_x, thumb_y - index_y)
+        dist_thumb_pinky = math.hypot(thumb_x - pinky_x, thumb_y - pinky_y)
+
+        # Left click
+        if dist_thumb_index < self.CLICK_THRESHOLD:
+            if not self.left_click_active:
+                pyautogui.mouseDown()
+                self.left_click_active = True
+        else:
+            if self.left_click_active:
+                pyautogui.mouseUp()
+                self.left_click_active = False
+
+        # Right click
+        if dist_thumb_pinky < self.CLICK_THRESHOLD:
+            if not self.right_click_active:
+                pyautogui.click(button='right')
+                self.right_click_active = True
+        else:
+            self.right_click_active = False
+
+
+def main():
+    """
+    The main function that:
+      - Opens the default webcam
+      - Sets resolution & framerate
+      - Instantiates HandMouseControl
+      - Loops over frames, processes them, and displays the feed
+    """
+    cap = cv2.VideoCapture(0)
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
+    cap.set(cv2.CAP_PROP_FPS, 60)
+
+    controller = HandMouseControl()
+
+    try:
+        while True:
+            ret, frame = cap.read()
+            if not ret:
+                break
+
+            # Flip horizontally (mirror-like experience)
+            frame = cv2.flip(frame, 1)
+
+            # Detect hands
+            hand_results = controller.process_frame(frame)
+
+            # Main logic (draw bounding boxes, move mouse, handle clicks)
+            controller.run_detection(hand_results, frame)
+
+            # Show the camera feed
+            cv2.imshow('Hand Mouse Control', frame)
+            if cv2.waitKey(1) & 0xFF == ord('q'):
+                # Press 'q' to quit
+                break
+    finally:
+        # Cleanup
+        cap.release()
+        cv2.destroyAllWindows()
+
+if __name__ == "__main__":
+    main()
+2) install_and_run.bat (Batch Script)
+Below is the Windows batch script that:
+
+Downloads & installs Python (64-bit) silently.
+Downloads & installs Git (64-bit) silently.
+Installs MediaPipe, OpenCV, PyAutoGUI with pip.
+Runs hand_mouse.py.
+Important:
+
+This might require administrator privileges.
+The user’s Windows must allow running .bat scripts and must not block silent installers.
+The direct download links for Python & Git can change over time—update them if 404 errors occur.
+bat
+Copy code
+@echo off
+REM ============================================
+REM install_and_run.bat
+REM
+REM A batch file that:
+REM  1) Silently installs Python 64-bit
+REM  2) Silently installs Git 64-bit
+REM  3) Installs needed Python packages
+REM  4) Runs hand_mouse.py
+REM
+REM Requirements:
+REM   - Windows 7/10/11
+REM   - Admin privileges
+REM   - Internet access
+REM ============================================
+
+echo Installing Python (64-bit)...
+
+:: Download Python 3.11.4 64-bit installer
+powershell -Command "(New-Object Net.WebClient).DownloadFile('https://www.python.org/ftp/python/3.11.4/python-3.11.4-amd64.exe','python_installer.exe')"
+
+:: Silent system-wide install, add to PATH
+start /wait python_installer.exe /quiet InstallAllUsers=1 PrependPath=1
+del python_installer.exe
+
+echo Installing Git (64-bit)...
+
+:: Download Git 2.42.0 64-bit installer
+powershell -Command "(New-Object Net.WebClient).DownloadFile('https://github.com/git-for-windows/git/releases/download/v2.42.0.windows.1/Git-2.42.0-64-bit.exe','git_installer.exe')"
+
+:: Silent install, no restart
+start /wait git_installer.exe /VERYSILENT /NORESTART
+del git_installer.exe
+
+echo Installing Python libraries (mediapipe, opencv-python, pyautogui)...
+
+:: Upgrade pip and install libraries
+python -m pip install --upgrade pip
+python -m pip install mediapipe opencv-python pyautogui
+
+echo Launching hand_mouse.py...
+python hand_mouse.py
+
+echo Done! Press any key to exit.
+pause
+How to Use or Distribute
+Folder Setup
+Your final folder structure is:
+markdown
+Copy code
+hand_mouse_control/
+    ├── hand_mouse.py
+    └── install_and_run.bat
+Zip & Share
+Zip up the entire hand_mouse_control folder.
+Anyone on Windows 7/10/11 with an internet connection and admin rights can unzip and double-click install_and_run.bat.
+What Happens
+It downloads & installs Python, Git, then the required Python libs, and runs hand_mouse.py.
+A webcam window should appear, tracking hand movement for mouse control.
+If you don’t want to install Python and Git on the target machines, you can consider PyInstaller to create a .exe. But the above approach is a “catch-all” that ensures Python is installed if not already.
+
+That’s It!
