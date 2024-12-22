@@ -9,6 +9,7 @@
 | **Index–Middle Distance** | Dynamic Mouse Speed        | Right Hand| Closer fingers => slower speed, farther => faster.                             |
 | **Index Finger (dx, dy)** | Actual Mouse Movement      | Right Hand| Moves cursor by `(dx, dy) * speed`, ignoring tiny jitter (`dead_zone`).         |
 
+#VIDEO 
 
 
 # Below is a concise list of all the “commands” or gestures the code supports, along with how they work. The script essentially splits hand usage into two zones:
